@@ -1,0 +1,191 @@
+from scipy.spatial import distance as dist
+from imutils import face_utils
+import numpy as np
+import cv2
+import dlib
+import RPi.GPIO as GPIO
+import time
+
+# 핀 번호 설정 / pin number settings
+buzzer = 13
+ledPin = 1
+servo_pin = 18
+trig = 23
+echo = 24
+GPIO.setmode(GPIO.BCM)
+GPIO.setwarnings(False)
+GPIO.setup(buzzer,GPIO.OUT)
+GPIO.setup(ledPin, GPIO.OUT)
+GPIO.setup(servo_pin,GPIO.OUT)          
+pwm_s = GPIO.PWM(18,50)
+GPIO.setup(trig,GPIO.OUT)
+GPIO.setup(echo,GPIO.IN)
+
+# 초음파 센서 초기화 / Reset an ultrasonic sensor
+GPIO.output(trig, False)
+time.sleep(2)
+
+# 캐스케이드로 객체 생성 및 정면 얼굴을 검출하는 xml파일 불러오기 / Create objects with Cascade and load '.xml files' that detect frontal faces
+# 얼굴 인식용 클래스 생성 / Create Class for face recognition
+faceCascade = cv2.CascadeClassifier(cv2.data.haarcascades +'haarcascade_frontalface_default.xml')
+detector = dlib.get_frontal_face_detector()
+# 인식된 얼굴에서 랜드마크를 찾기위한 클래스 생성 / Create Class to find landmarks on recognized face
+predictor = dlib.shape_predictor("shape_predictor_68_face_landmarks.dat")
+
+# 68개 랜드마크의 구간별 포인트 / Points by section of 68 landmarks
+JAWLINE_POINTS = list(range(0,17))
+RIGHT_EYEBROW_POINTS = list(range(17,22))
+LEFT_EYEBROW_POINTS = list(range(22,27))
+NOSE_POINTS = list(range(27,36))
+RIGHT_EYE_POINTS = list(range(36,42))                   
+LEFT_EYE_POINTS = list(range(42,48))
+MOUTH_OUTLINE_POINTS = list(range(48,61))
+MOUTH_INNER_POINTS = list(range(61,68))
+
+EYE_AR_THRESH = 0.2             # 깜빡임으로 인식하는 눈 종횡비의 임계값 / Critical value(threshold) of the eye aspect ratio recognized by blinking              
+COUNTER = 0                     # 프레임을 카운트하는 변수 설정 / Set variables to count frames
+
+# 눈에 대한 랜드 마크의 인덱스 설정 / Set the index of eyes' landmarks
+(lStart, lEnd) = face_utils.FACIAL_LANDMARKS_IDXS["left_eye"]
+(rStart, rEnd) = face_utils.FACIAL_LANDMARKS_IDXS["right_eye"]
+
+# video capture 객체 생성 / Create object 'video capture'
+video_capture=cv2.VideoCapture(0)
+
+# video 가로 세로 길이 설정 / Set video width and height
+video_capture.set(cv2.CAP_PROP_FRAME_WIDTH,240)
+video_capture.set(cv2.CAP_PROP_FRAME_HEIGHT,240)
+
+# 얼굴 랜드마크 표시 설정 / Set the face landmarks
+def detect(gray,frame):
+    
+    faces = faceCascade.detectMultiScale(
+        gray,               # 검출하고자 하는 원본이미지
+        scaleFactor=1.05,   # 검색 윈도우 확대 비율, 1보다 커야 함
+        minNeighbors=5,     # 얼굴 사이 최소 간격(픽셀)
+        flags=cv2.CASCADE_SCALE_IMAGE,
+        minSize=(100,100)   # 얼굴 최소 크기
+        )
+    
+    for (x,y,w,h) in faces:
+        
+         # x,y는 얼굴의 시작 x,y 지점, w,h는 얼굴의 세로와 가로 길이         
+         dlib_rect = dlib.rectangle(int(x), int(y), int(x+w), int (y+h))
+         
+         # 넘파이 배열 설정
+         landmarks = np.matrix([[p.x, p.y] for p in predictor(frame, dlib_rect).parts()])
+         
+         # 프레임 드랍을 줄이기 위해 68개 전체의 랜드마크를 영상 재생시 표시하지 않음
+         landmarks_display = landmarks[0:0]
+         
+    return frame
+
+# 눈의 종횡비 계산
+def eye_aspect_ratio(eye):
+
+   A = dist.euclidean(eye[1], eye[5])
+   B = dist.euclidean(eye[2], eye[4])
+   C = dist.euclidean(eye[0], eye[3])              
+
+   ear = (A + B) / (2.0 * C)                       
+
+   return ear
+
+# 영상 재생 반복        
+while True:
+    _, frame = video_capture.read()               # 비디오 프레임 읽기         
+    gray = cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY) # OpenCV에서 BGR을 Gray-sacle image로 사용
+    canvas = detect(gray, frame)                  # 영상 재생 시 눈의 랜드마크를 표시
+    rects = detector(gray,0)                      # 얼굴 영역을 rects로 설정
+
+    # rects에서 눈 깜빡임 감지
+    for rect in rects:
+
+        shape = predictor(gray, rect)           # 얼굴 영역의 랜드마크 결정
+        shape = face_utils.shape_to_np(shape)   # 얼굴 랜드마크 (x, y) 좌표를 NumPy 배열로 변환
+
+        # 두 눈 좌표 추출
+        leftEye = shape[lStart:lEnd]            
+        rightEye = shape[rStart:rEnd]
+
+        # 두 눈의 종횡비 계산
+        leftEAR = eye_aspect_ratio(leftEye)
+        rightEAR = eye_aspect_ratio(rightEye)
+
+        # 두 눈의 평균 종횡비
+        ear = (leftEAR + rightEAR) / 2.0
+
+        # 두 눈의 주어진 좌표로부터 convexhull을 반환 후 영상 재생 시 눈 시각화 
+        leftEyeHull = cv2.convexHull(leftEye)
+        rightEyeHull = cv2.convexHull(rightEye)
+        cv2.drawContours(frame, [leftEyeHull], -1, (0, 255, 0), 1)
+        cv2.drawContours(frame, [rightEyeHull], -1, (0, 255, 0), 1)
+
+        # 눈의 종횡비가 임계값 0.2 보다 작으면 프레임을 카운트 함
+        if ear < EYE_AR_THRESH:                             
+            COUNTER += 1
+            if COUNTER == 30: # (약 5초) 30을 카운트하는 동안 눈을 감고 있을 경우 아래 실행
+
+                # 부저 작동
+                GPIO.output(13,True)
+                time.sleep(0.5)                 # 부저를 끄지 않으면 if문이 끝날 때 까지 울림
+
+                # LED 작동
+                for i in range(0,4):
+                    GPIO.output(ledPin, GPIO.HIGH)
+                    time.sleep(0.5)
+                    GPIO.output(ledPin, GPIO.LOW)
+                    time.sleep(0.5)
+
+                # 서보모터 작동 
+                for i in range(124,80,-1):
+                    pwm_s.start(3.0)
+                    pwm_s.ChangeDutyCycle(i/10.0)
+                    time.sleep(0.060)
+                    pwm_s.ChangeDutyCycle(0.0) 
+
+
+                # 초음파 센서 작동
+                try:
+                    # 초음파 센서 무한 반복
+                    while(True):
+                        GPIO.output(trig, True)
+                        time.sleep(0.00001)
+                        GPIO.output(trig, False)
+                        
+                        while GPIO.input(echo)==0:
+                            start = time.time()
+                            
+                        while GPIO.input(echo)==1:
+                            stop = time.time()
+
+                        # 초음파 센서와 물체간의 거리 계산
+                        check_time = stop - start
+                        distance = check_time*34300/2
+                        print("Distance : %1f cm" % distance)
+                        time.sleep(0.4)
+
+                        # 초음파 센서와 물체의 거리 값이 7cm보다 작으면 다음 실행
+                        if distance <= 7:
+                            # 부저 정지
+                            GPIO.output(13,False)
+                            # 서보 모터 역방향 작동
+                            for i in range(0,60):
+                                pwm_s.start(3.0)
+                                pwm_s.ChangeDutyCycle(i/10.0)
+                                time.sleep(0.055)
+                                pwm_s.ChangeDutyCycle(0.0)
+                            break
+                except:
+                    GPIO.cleanup()
+
+                # 카운트를 0으로 초기화                    
+                COUNTER = 0
+        else:
+            COUNTER = 0
+    cv2.imshow("webcam",canvas)
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+video_capture.release()
+cv2.destroyAllwindows()
+GPIO.cleanup()
